@@ -1,187 +1,323 @@
-//variables for canva
+// variabili per il canvas
 let xMax = 400;
 let yMax = 600;
-//other global variables
-let table;
+// altre variabili globali
+let table; // legacy: mantenuto per compatibilità (alfa)
+// nuove tabelle per più droni
+let tableAlfa, tableBravo, tableCharlie;
 
-let bckgcolor = "#C0E1FC"
+let bckgcolor = "#000000"   // sfondo nero per l'area 3D
 
-// Nuove variabili globali per animazione/ordinamento
-let sortedOrder = [];      // array di indici ordinati per timestamp (colonna 2)
-let visibleCount = 0;      // quanti punti mostrare
-let framesPerPoint = 6;    // regolare la velocità (minore = più veloce)
+// variabili globali per animazione/ordinamento
+let sortedOrderMap = { alfa: [], bravo: [], charlie: [] }; // array di indici ordinati per timestamp
+let visibleCountGlobal = 0;      // contatore globale usato per tutti i droni
+let framesPerPoint = 0.2;    // regolare la velocità (minore = più veloce)
+
+// flag per impostare la camera iniziale una sola volta sul graphics 3D
+let initialCameraSet3d = false;
+
+// intervalli globali (usati per mappare le traiettorie nello stesso sistema di assi)
+let globalRanges = { xmin: 0, xmax: 1, ymin: 0, ymax: 1, zmin: 0, zmax: 1 };
+
+// buffer grafico 3D e dimensioni/sezione
+let gfx3d;
+let gfxWFrac = 0.7; // percentuale di larghezza per il pannello 3D (0..1)
+let gfxX = 0, gfxY = 0, gfxW = 0, gfxH = 0;
+
+// camera 3D manuale (stile arcball) per gfx3d
+let camTheta = 0;      // angolo orizzontale (radians) - 0 => +X
+let camPhi = 0;        // angolo verticale (radians) - 0 => equatore
+let camDistance = 400; // distanza iniziale
+const CAM_MIN_DIST = 50;
+const CAM_MAX_DIST = 2000;
+const CAM_SENS_X = 0.005;
+const CAM_SENS_Y = 0.005;
+const CAM_ZOOM_SENS = 0.003;
 
 function preload() {
-  table = loadTable("drone_alfa_data.csv", "csv", "header");
-}
+  // carica i tre file CSV (se non presenti p5 darà errore in console)
+  tableAlfa = loadTable("drone_alfa_data.csv", "csv", "header");
+  tableBravo = loadTable("drone_bravo_data.csv", "csv", "header");
+  tableCharlie = loadTable("drone_charlie_data.csv", "csv", "header");
 
+  // variabile 'table' puntata ad alfa per compatibilità con codice esistente
+  table = tableAlfa;
+}
 
 function setup() {
-  createCanvas(windowWidth, windowHeight, WEBGL);
+  createCanvas(windowWidth, windowHeight); // canvas principale 2D
   frameRate(30);
 
-  // calcola l'ordine dei punti in base alla colonna "timestamp" (colonna 2)
-  computeSortedOrder();
+  // dimensioni pannello 3D
+  gfxW = Math.floor(windowWidth * gfxWFrac);
+  gfxH = windowHeight;
+  gfxX = 0; gfxY = 0;
+  gfx3d = createGraphics(gfxW, gfxH, WEBGL);
+
+  computeSortedOrders();
+  computeGlobalRanges();
+
+  // impostazioni camera iniziali coerenti con camera(400,0,0,...)
+  camTheta = 0;
+  camPhi = 0;
+  camDistance = 400;
 }
 
-function computeSortedOrder() {
-  sortedOrder = [];
-  if (!table) return;
-  const n = table.getRowCount();
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  gfxW = Math.floor(windowWidth * gfxWFrac);
+  gfxH = windowHeight;
+  gfx3d.remove();
+  gfx3d = createGraphics(gfxW, gfxH, WEBGL);
+  // reset flag camera dopo la ricreazione del buffer grafico
+  initialCameraSet3d = false;
+}
+
+// calcolo ordine e intervalli globali 
+function computeSortedOrders() {
+  sortedOrderMap = { alfa: [], bravo: [], charlie: [] };
+  computeSortedOrderFor(tableAlfa, 'alfa');
+  computeSortedOrderFor(tableBravo, 'bravo');
+  computeSortedOrderFor(tableCharlie, 'charlie');
+}
+
+function computeSortedOrderFor(t, key) {
   const arr = [];
+  const validRows = [];
+  if (!t) { sortedOrderMap[key] = []; return; }
+  const n = t.getRowCount();
   for (let i = 0; i < n; i++) {
-    // prendi valore di ordinamento: preferisci header 'timestamp', altrimenti colonna 1
-    let orderVal = table.getNum(i, 'timestamp');
-    if (!isFinite(orderVal)) orderVal = parseFloat(table.getString(i, 1));
-    // verifica che esistano coordinate valide
-    let xv = table.getNum(i, 'x_pos'); if (!isFinite(xv)) xv = parseFloat(table.getString(i, 2));
-    let yv = table.getNum(i, 'y_pos'); if (!isFinite(yv)) yv = parseFloat(table.getString(i, 3));
-    let zv = table.getNum(i, 'z_pos'); if (!isFinite(zv)) zv = parseFloat(table.getString(i, 4));
-    if (isFinite(xv) && isFinite(yv) && isFinite(zv) && isFinite(orderVal)) {
-      arr.push({ idx: i, order: orderVal });
-    }
-  }
-  // ordina crescente per orderVal
-  arr.sort((a, b) => a.order - b.order);
-  sortedOrder = arr.map(e => e.idx);
-}
-
-// disegna i tre assi drawAxes3D
-function drawAxes3D(len) {
-  push();
-  strokeWeight(4);
-
-  // asse X (rosso) da 0 a +len
-  stroke(255, 0, 0);
-  line(0, 0, 0, len, 0, 0);
-  push();
-  translate(len, 0, 0);
-  fill(255, 0, 0);
-  noStroke();
-  pop();
-
-  // asse Y (verde) da 0 a +len
-  stroke(0, 255, 0);
-  line(0, 0, 0, 0, len, 0);
-  push();
-  translate(0, len, 0);
-  fill(0, 255, 0);
-  noStroke();
-  pop();
-
-  // asse Z (blu) da 0 a +len
-  stroke(0, 0, 255);
-  line(0, 0, 0, 0, 0, len);
-  push();
-  translate(0, 0, len);
-  fill(0, 0, 255);
-  noStroke();
-  pop();
-
-  pop();
-}
-
-// ---------- nuove funzioni richieste ----------
-
-/**
- * drawPoint(x, y, z, options)
- * Disegna una singola sfera alle coordinate (x,y,z).
- * options: { radius (number), color ([r,g,b]) }
- */
-function drawPoint(x, y, z, options = {}) {
-  // r molto piccolo in pixel
-  const r = options.radius ?? 1.5;
-  const col = options.color ?? [0, 150, 255];
-
-  push();
-  translate(x, y, z);
-  noStroke();
-  ambientMaterial(col[0], col[1], col[2]);
-  sphere(r);
-  pop();
-}
-
-/**
- * drawPointsForAxes(axisLen, options, maxPoints)
- * Disegna i punti mappati negli assi ma solo i primi `maxPoints` secondo sortedOrder.
- */
-function drawPointsForAxes(axisLen = 200, options = {}, maxPoints = Infinity) {
-  if (!table) return;
-  const n = table.getRowCount();
-
-  // raccogli valori e calcola min/max per ogni asse (solo righe valide)
-  let xs = [], ys = [], zs = [], validIdx = [];
-  for (let i = 0; i < n; i++) {
-    let xv = table.getNum(i, 'x_pos'); if (!isFinite(xv)) xv = parseFloat(table.getString(i, 2));
-    let yv = table.getNum(i, 'y_pos'); if (!isFinite(yv)) yv = parseFloat(table.getString(i, 3));
-    let zv = table.getNum(i, 'z_pos'); if (!isFinite(zv)) zv = parseFloat(table.getString(i, 4));
+    // valore usato per ordinare: preferisce 'timestamp', altrimenti colonna 1
+    let orderVal = t.getNum(i, 'timestamp');
+    if (!isFinite(orderVal)) orderVal = parseFloat(t.getString(i, 1));
+    // lettura coordinate (con fallback a stringhe se necessario)
+    let xv = t.getNum(i, 'x_pos'); if (!isFinite(xv)) xv = parseFloat(t.getString(i, 2));
+    let yv = t.getNum(i, 'y_pos'); if (!isFinite(yv)) yv = parseFloat(t.getString(i, 3));
+    let zv = t.getNum(i, 'z_pos'); if (!isFinite(zv)) zv = parseFloat(t.getString(i, 4));
     if (isFinite(xv) && isFinite(yv) && isFinite(zv)) {
-      xs.push(xv); ys.push(yv); zs.push(zv);
-      validIdx.push(i);
+      validRows.push(i);
+      if (isFinite(orderVal)) arr.push({ idx: i, order: orderVal });
     }
   }
+  if (arr.length > 0) {
+    arr.sort((a,b) => a.order - b.order);
+    sortedOrderMap[key] = arr.map(e => e.idx);
+  } else {
+    // fallback: ordine naturale delle righe valide
+    sortedOrderMap[key] = validRows.slice();
+  }
+}
 
-  if (xs.length === 0) return;
-
+function computeGlobalRanges() {
+  let xs = [], ys = [], zs = [];
+  const tables = [tableAlfa, tableBravo, tableCharlie];
+  for (let t of tables) {
+    if (!t) continue;
+    for (let i = 0; i < t.getRowCount(); i++) {
+      let xv = t.getNum(i, 'x_pos'); if (!isFinite(xv)) xv = parseFloat(t.getString(i, 2));
+      let yv = t.getNum(i, 'y_pos'); if (!isFinite(yv)) yv = parseFloat(t.getString(i, 3));
+      let zv = t.getNum(i, 'z_pos'); if (!isFinite(zv)) zv = parseFloat(t.getString(i, 4));
+      if (isFinite(xv) && isFinite(yv) && isFinite(zv)) {
+        xs.push(xv); ys.push(yv); zs.push(zv);
+      }
+    }
+  }
+  if (xs.length === 0) {
+    globalRanges = { xmin: 0, xmax: 1, ymin: 0, ymax: 1, zmin: 0, zmax: 1 };
+    return;
+  }
   let xmin = Math.min(...xs), xmax = Math.max(...xs);
   let ymin = Math.min(...ys), ymax = Math.max(...ys);
   let zmin = Math.min(...zs), zmax = Math.max(...zs);
-
-  // evita zero-range
   if (xmax === xmin) xmax = xmin + 1e-6;
   if (ymax === ymin) ymax = ymin + 1e-6;
   if (zmax === zmin) zmax = zmin + 1e-6;
+  globalRanges = { xmin, xmax, ymin, ymax, zmin, zmax };
+}
+// fine calcolo ordine e intervalli
 
-  // usa sortedOrder calcolato in setup; se vuoto, fallback a validIdx in ordine naturale
-  const orderArr = (sortedOrder && sortedOrder.length > 0) ? sortedOrder : validIdx;
-  const limit = Math.min(orderArr.length, maxPoints);
+// disegna i tre assi sul contesto grafico g (gfx3d)
+function drawAxes3D(g, len) {
+  g.push();
+  g.strokeWeight(1.5);
+  // asse X tenue (grigio chiaro)
+  g.stroke(200,200,200);
+  g.line(0,0,0, -len,0,0);
+  // asse Y tenue (leggero blu)
+  g.stroke(180,180,200);
+  g.line(0,0,0, 0,len,0);
+  // asse Z tenue (leggero caldo)
+  g.stroke(160,170,180);
+  g.line(0,0,0, 0,0,len);
+  g.pop();
+}
 
+// disegna una sfera sul contesto g
+function drawPoint(g, x, y, z, options = {}) {
+  const r = options.radius ?? 1.6;
+  const col = options.color ?? [255,80,80,200];
+  g.push();
+  g.translate(x, y, z);
+  g.noStroke();
+  // usare emissiveMaterial per colori costanti su sfondo scuro
+  g.emissiveMaterial(col[0], col[1], col[2]);
+  g.sphere(r);
+  g.pop();
+}
+
+// disegna traiettoria e punti per una tabella sul contesto g
+function drawTrajectoryForTableOnG(g, t, orderArr, axisLen = 200, opts = {}) {
+  if (!t) return;
+  if (!orderArr || orderArr.length === 0) return;
+
+  const xmin = globalRanges.xmin, xmax = globalRanges.xmax;
+  const ymin = globalRanges.ymin, ymax = globalRanges.ymax;
+  const zmin = globalRanges.zmin, zmax = globalRanges.zmax;
+
+  const limit = Math.min(orderArr.length, opts.maxPoints ?? orderArr.length);
+  const pts = [];
   for (let k = 0; k < limit; k++) {
     const i = orderArr[k];
-    let xv = table.getNum(i, 'x_pos'); if (!isFinite(xv)) xv = parseFloat(table.getString(i, 2));
-    let yv = table.getNum(i, 'y_pos'); if (!isFinite(yv)) yv = parseFloat(table.getString(i, 3));
-    let zv = table.getNum(i, 'z_pos'); if (!isFinite(zv)) zv = parseFloat(table.getString(i, 4));
+    let xv = t.getNum(i, 'x_pos'); if (!isFinite(xv)) xv = parseFloat(t.getString(i, 2));
+    let yv = t.getNum(i, 'y_pos'); if (!isFinite(yv)) yv = parseFloat(t.getString(i, 3));
+    let zv = t.getNum(i, 'z_pos'); if (!isFinite(zv)) zv = parseFloat(t.getString(i, 4));
+    if (!isFinite(xv) || !isFinite(yv) || !isFinite(zv)) continue;
 
-    // mappa: min -> 0, max -> axisLen
     let mx = map(xv, xmin, xmax, 0, axisLen);
     let my = map(yv, ymin, ymax, 0, axisLen);
     let mz = map(zv, zmin, zmax, 0, axisLen);
 
-    // clamp dentro gli assi
     mx = constrain(mx, 0, axisLen);
     my = constrain(my, 0, axisLen);
     mz = constrain(mz, 0, axisLen);
 
-    drawPoint(mx, my, mz, options);
+    // X verso sinistra (negativo), Y verso destra (positivo), Z verso l'alto
+    pts.push({ x: -mx, y: my, z: mz });
+  }
+
+  if (pts.length > 1) {
+    const col = opts.color ?? [255,80,80,200];
+    g.stroke(col[0], col[1], col[2], col[3] ?? 255);
+    g.strokeWeight(opts.strokeWeight ?? 1.5);
+    g.noFill();
+    g.beginShape();
+    for (let p of pts) g.vertex(p.x, p.y, p.z);
+    g.endShape();
+    g.noStroke();
+  }
+
+  for (let p of pts) {
+    drawPoint(g, p.x, p.y, p.z, { radius: opts.radius ?? 1.6, color: opts.color });
   }
 }
-// ---------- fine nuove funzioni ----------
 
 function draw() {
-  // semplice background neutro
-  background(200);
+  // sfondo principale 2D (resto del foglio)
+  background(34); // scuro neutro per il resto del foglio
 
-  // permette di ruotare la vista con il mouse (drag) e zoom (scroll)
-  orbitControl();
+  // aggiorna contatore globale per la progressione dei punti
+  visibleCountGlobal = Math.floor(frameCount / framesPerPoint);
 
-  // luce semplice per evidenziare oggetti
-  directionalLight(255, 255, 255, 0.5, -1, -0.5);
-  ambientLight(80);
+  // RENDER 3D nel gfx3d (solo in quella sezione)
+  if (gfx3d) {
+    gfx3d.push();
+    gfx3d.background(bckgcolor);
 
-  // aggiorna quanti punti mostrare in base al tempo (frameCount)
-  if (sortedOrder && sortedOrder.length > 0) {
-    visibleCount = Math.min(sortedOrder.length, Math.floor(frameCount / framesPerPoint));
-  } else {
-    visibleCount = 0;
+    // calcola posizione camera dai parametri (impostata ogni frame)
+    const phi = camPhi;
+    const theta = camTheta;
+    const r = camDistance;
+    const eyeX = r * Math.cos(phi) * Math.cos(theta);
+    const eyeY = r * Math.cos(phi) * Math.sin(theta);
+    const eyeZ = r * Math.sin(phi);
+    // imposta la camera con up = Z (0,0,1)
+    gfx3d.camera(eyeX, eyeY, eyeZ,  0, 0, 0,  0, 0, 1);
+
+    // disattiva luci per rendering piatto
+    gfx3d.noLights();
+
+    // la vista 3D è già centrata di default
+    gfx3d.translate(0, 0, 0);
+
+    const axisLen = 200;
+    drawAxes3D(gfx3d, axisLen);
+
+    // disegna i tre droni nello stesso grafico con colori differenti
+    drawTrajectoryForTableOnG(gfx3d, tableAlfa, sortedOrderMap.alfa, axisLen, {
+      color: [255, 80, 80, 200],
+      radius: 1.8,
+      strokeWeight: 1.8,
+      maxPoints: Math.min(sortedOrderMap.alfa.length, visibleCountGlobal)
+    });
+    drawTrajectoryForTableOnG(gfx3d, tableBravo, sortedOrderMap.bravo, axisLen, {
+      color: [80, 220, 120, 200],
+      radius: 1.8,
+      strokeWeight: 1.8,
+      maxPoints: Math.min(sortedOrderMap.bravo.length, visibleCountGlobal)
+    });
+    drawTrajectoryForTableOnG(gfx3d, tableCharlie, sortedOrderMap.charlie, axisLen, {
+      color: [100, 150, 255, 200],
+      radius: 1.8,
+      strokeWeight: 1.8,
+      maxPoints: Math.min(sortedOrderMap.charlie.length, visibleCountGlobal)
+    });
+
+    gfx3d.pop();
+
+    // disegna il buffer 3D sul canvas principale nella sezione desiderata
+    image(gfx3d, gfxX, gfxY);
   }
 
-  // disegna assi con Z rivolto verso l'alto dello schermo
-  push();
-  rotateX(-HALF_PI);
-  const axisLen = 200;
-  drawAxes3D(axisLen);
+  // legenda 2D nella sezione a destra 
+  const legendX = gfxW + 20;
+  const legendY = 40;
+  const legendW = width - legendX - 20;
+  const items = [
+    { name: 'Drone Alfa', color: [255, 80, 80] },
+    { name: 'Drone Bravo', color: [80, 220, 120] },
+    { name: 'Drone Charlie', color: [100, 150, 255] }
+  ];
 
-  // disegna i punti del dataset progressivamente (maxPoints = visibleCount)
-  drawPointsForAxes(axisLen, { radius: 1.5, color: [0, 150, 255] }, visibleCount);
+  // sfondo della legenda
+  noStroke();
+  fill(20, 160);
+  rect(legendX, legendY - 10, legendW, 140, 8);
 
+  // testi e indicatori colore
+  textSize(14);
+  for (let i = 0; i < items.length; i++) {
+    const y = legendY + i * 36;
+    fill(items[i].color[0], items[i].color[1], items[i].color[2]);
+    ellipse(legendX + 18, y, 14, 14);
+    fill(230);
+    textAlign(LEFT, CENTER);
+    text(items[i].name, legendX + 36, y);
+  }
+}
+
+// interazione mouse per la camera 3D (solo quando il cursore è dentro l'area gfx3d)
+function mouseDragged() {
+  if (isMouseInGfx()) {
+    const dx = (mouseX - pmouseX);
+    const dy = (mouseY - pmouseY);
+    camTheta -= dx * CAM_SENS_X;
+    camPhi += dy * CAM_SENS_Y;
+    const limit = PI/2 - 0.01;
+    if (camPhi > limit) camPhi = limit;
+    if (camPhi < -limit) camPhi = -limit;
+    return false; // evita interferenze con lo scorrimento della pagina
+  }
+}
+
+function mouseWheel(event) {
+  if (isMouseInGfx()) {
+    camDistance += event.delta * CAM_ZOOM_SENS;
+    camDistance = constrain(camDistance, CAM_MIN_DIST, CAM_MAX_DIST);
+    return false; // previene lo scroll della pagina
+  }
+  // altrimenti comportamento di default
+}
+
+function isMouseInGfx() {
+  return mouseX >= gfxX && mouseX <= gfxX + gfxW && mouseY >= gfxY && mouseY <= gfxY + gfxH;
 }
